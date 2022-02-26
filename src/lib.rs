@@ -1,7 +1,5 @@
 use std::convert::TryInto;
-use std::io::Read;
-use std::io::Write;
-use std::net::TcpStream;
+use tokio::net::TcpStream;
 use std::str::from_utf8;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::Relaxed};
 
@@ -55,9 +53,9 @@ pub struct Client {
 
 impl Client {
     /// Create a new client, the host and port is taken in then connected to via tcp
-    pub fn new(host: &str, port: &str) -> Client {
+    pub async fn new(host: &str, port: &str) -> Client {
         let conn =
-            TcpStream::connect(format!("{}:{}", host, port)).expect("failed to open tcp stream");
+            TcpStream::connect(format!("{}:{}", host, port)).await.unwrap();
 
         Client {
             conn,
@@ -67,11 +65,11 @@ impl Client {
     }
 
     /// Authenticate the client by sending a password packet and reading the response
-    pub fn auth(&mut self, password: &str) -> Result<(), ()> {
-        self.send(password, Some(PacketType::Auth))?;
+    pub async fn auth(&mut self, password: &str) -> Result<(), ()> {
+        self.send(password, Some(PacketType::Auth)).await?;
         self.auth = AtomicBool::new(true);
         let mut response = [0u8; MAX_PACKET];
-        self.conn.read(&mut response).unwrap();
+        self.conn.try_read(&mut response).unwrap();
         let _ = Packet::decode(response.to_vec());
         Ok(())
     }
@@ -84,7 +82,7 @@ impl Client {
     }
 
     /// send a message over the tcp stream
-    pub fn send(&mut self, cmd: &str, msg_type: Option<PacketType>) -> Result<(), ()> {
+    pub async fn send(&mut self, cmd: &str, msg_type: Option<PacketType>) -> Result<(), ()> {
         let msg_type = match msg_type {
             Some(v) => v,
             None => PacketType::Cmd,
@@ -96,7 +94,7 @@ impl Client {
             body: cmd.to_string(),
         };
 
-        self.conn.write_all(&message.encode()).unwrap();
+        self.conn.try_write(&message.encode().await).unwrap();
         Ok(())
     }
 }
@@ -104,7 +102,7 @@ impl Client {
 impl Packet {
     
     /// encode packet struct into a byte vector
-    pub fn encode(&self) -> Vec<u8> {
+    pub async fn encode(&self) -> Vec<u8> {
         let mut data: Vec<u8> = Vec::new();
 
         let p = self;
@@ -126,7 +124,7 @@ impl Packet {
     }
 
     /// decode byte vector into packet struct
-    pub fn decode(data: Vec<u8>) -> Packet {
+    pub async fn decode(data: Vec<u8>) -> Packet {
         let len = i32::from_le_bytes(data[0..4].try_into().unwrap());
         let id = i32::from_le_bytes(data[0..4].try_into().unwrap());
         let packet_type = i32::from_le_bytes(data[8..12].try_into().unwrap());
