@@ -1,5 +1,6 @@
 use std::convert::TryInto;
-use tokio::net::TcpStream;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::str::from_utf8;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::Relaxed};
 
@@ -12,6 +13,19 @@ pub enum PacketType {
     _None,
     Cmd,
     Auth,
+}
+
+#[derive(Debug)]
+pub enum RconError {
+    DecodeError,
+    AuthError,
+    SendError,
+}
+
+impl std::fmt::Display for RconError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 /// Packet struct
@@ -53,24 +67,21 @@ pub struct Client {
 
 impl Client {
     /// Create a new client, the host and port is taken in then connected to via tcp
-    pub async fn new(host: &str, port: &str) -> Client {
+    pub fn new(host: &str, port: &str) -> Result<Client, std::io::Error> {
         let conn =
-            TcpStream::connect(format!("{}:{}", host, port)).await.unwrap();
+            TcpStream::connect(format!("{}:{}", host, port))?;
 
-        Client {
+        Ok(Client {
             conn,
             next: AtomicI32::new(0),
             auth: AtomicBool::new(false),
-        }
+        })
     }
 
     /// Authenticate the client by sending a password packet and reading the response
-    pub async fn auth(&mut self, password: &str) -> Result<(), ()> {
-        self.send(password, Some(PacketType::Auth)).await?;
+    pub fn auth(&mut self, password: &str) -> Result<(), crate::RconError> {
+        self.send(password, Some(PacketType::Auth))?;
         self.auth = AtomicBool::new(true);
-        let mut response = [0u8; MAX_PACKET];
-        self.conn.try_read(&mut response).unwrap();
-        let _ = Packet::decode(response.to_vec());
         Ok(())
     }
 
@@ -82,7 +93,7 @@ impl Client {
     }
 
     /// send a message over the tcp stream
-    pub async fn send(&mut self, cmd: &str, msg_type: Option<PacketType>) -> Result<(), ()> {
+    pub fn send(&mut self, cmd: &str, msg_type: Option<PacketType>) -> Result<String, crate::RconError> {
         let msg_type = match msg_type {
             Some(v) => v,
             None => PacketType::Cmd,
@@ -94,15 +105,26 @@ impl Client {
             body: cmd.to_string(),
         };
 
-        self.conn.try_write(&message.encode().await).unwrap();
-        Ok(())
+        let _ = match self.conn.write(&message.encode()) {
+            Ok(v) => v,
+            Err(_) => return Err(RconError::SendError),
+        };
+        let mut response = [0u8; MAX_PACKET];
+        let _ = match self.conn.read(&mut response) {
+            Ok(v) => v,
+            Err(_) => return Err(RconError::SendError),
+        };
+        Ok(match Packet::decode(response.to_vec()) {
+            Ok(v) => v,
+            Err(_) => return Err(RconError::SendError),
+        }.body)
     }
 }
 
 impl Packet {
     
     /// encode packet struct into a byte vector
-    pub async fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Vec<u8> {
         let mut data: Vec<u8> = Vec::new();
 
         let p = self;
@@ -117,30 +139,45 @@ impl Packet {
             data.extend_from_slice(&i);
         }
 
-        data.extend_from_slice(&p.body.as_bytes());
+        data.extend_from_slice(p.body.as_bytes());
         data.extend_from_slice(&[0, 0]);
 
         data
     }
 
     /// decode byte vector into packet struct
-    pub async fn decode(data: Vec<u8>) -> Packet {
-        let len = i32::from_le_bytes(data[0..4].try_into().unwrap());
-        let id = i32::from_le_bytes(data[0..4].try_into().unwrap());
-        let packet_type = i32::from_le_bytes(data[8..12].try_into().unwrap());
+    pub fn decode(data: Vec<u8>) -> Result<Packet, crate::RconError> {
+        let len = i32::from_le_bytes(match data[0..4].try_into() {
+            Ok(v) => v,
+            Err(_) => return Err(RconError::DecodeError),
+        });
+        let id = i32::from_le_bytes(match data[0..4].try_into() {
+            Ok(v) => v,
+            Err(_) => return Err(RconError::DecodeError),
+        });
+        let packet_type = i32::from_le_bytes(match data[8..12].try_into() {
+            Ok(v) => v,
+            Err(_) => return Err(RconError::DecodeError),
+        });
 
         let mut body = "".to_string();
-        let body_len: usize = (len - 10).try_into().unwrap();
+        let body_len: usize = match (len - 10).try_into() {
+            Ok(v) => v,
+            Err(_) => return Err(RconError::DecodeError),
+        };
 
         if body_len > 0 {
-            body = from_utf8(&data[12..12 + body_len]).unwrap().to_string();
+            body = match from_utf8(&data[12..12 + body_len]) {
+                Ok(v) => v,
+                Err(_) => return Err(RconError::DecodeError),
+            }.to_string();
         }
 
-        Packet {
+        Ok(Packet {
             len,
             id,
             packet_type,
             body,
-        }
+        })
     }
 }
